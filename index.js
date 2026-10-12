@@ -2,14 +2,11 @@
     /* Ported from Vencord/Equicord "AddAttachments" by Lumap. SPDX-License-Identifier: GPL-3.0-or-later */
     const RN = vendetta.metro.common.ReactNative;
     try {
-    // Set to false once the "Add Attachments" row shows up reliably.
     const DEBUG = false;
-    // Temporary: reports upload internals so the photo-tray-in-edit-mode hook can be written.
-    const PROBE = true;
 
     const { findByProps, findByStoreName } = vendetta.metro;
     const { React } = vendetta.metro.common;
-    const { after, before } = vendetta.patcher;
+    const { after, before, instead } = vendetta.patcher;
     const { getAssetIDByName } = vendetta.ui.assets;
     const { showToast } = vendetta.ui.toasts;
 
@@ -18,11 +15,16 @@
     const RestAPI = findByProps("getAPIBaseURL", "get", "post", "patch");
     const UserStore = findByStoreName("UserStore");
     const MessageStore = findByStoreName("MessageStore");
+    const EditMessageStore = findByStoreName("EditMessageStore");
+    // upload actions module (popFirstFile, addFile(s), setFile, clearAll, ...)
+    const UP = findByProps("uploadLocalFiles") || findByProps("addFiles") || findByProps("addFile");
 
     const MAX_ATTACHMENTS = 10;
     const VOICE_MESSAGE_FLAG = 1 << 13;
 
     const dbg = text => { if (DEBUG) showToast("AddAttachments: " + text); };
+
+    // ---------------------------------------------------------------- picking (long-press row)
 
     async function pickFiles() {
         // react-native-document-picker style
@@ -54,21 +56,22 @@
         );
     }
 
-    async function addAttachments(channelId, messageId) {
+    // ---------------------------------------------------------------- upload to an existing message
+
+    // uploads/patches run one at a time so several photos picked in a row don't overwrite each other
+    let queue = Promise.resolve();
+    function enqueue(task) {
+        queue = queue.then(task).catch(e => {
+            console.error("[AddAttachments]", e);
+            showToast("Failed: " + (e && e.message ? e.message : e));
+        });
+    }
+
+    async function uploadPicked(channelId, messageId, picked) {
         const current = MessageStore.getMessage(channelId, messageId);
         const existing = (current && current.attachments) || [];
         const remaining = MAX_ATTACHMENTS - existing.length;
         if (remaining <= 0) return showToast("You cannot add more attachments to this message.");
-
-        let picked;
-        try {
-            picked = await pickFiles();
-        } catch (e) {
-            if (e && e.code === "DOCUMENT_PICKER_CANCELED") return;
-            return showToast("File picker failed: " + (e && e.message ? e.message : e));
-        }
-        if (!picked.length) return;
-
         if (picked.length > remaining)
             return showToast("You can only add " + remaining + " more attachment" + (remaining === 1 ? "" : "s") + " to this message.");
 
@@ -118,7 +121,98 @@
         }
     }
 
-    // ---- action sheet injection (modeled on the HideActionSheetButtons plugin) ----
+    async function addAttachments(channelId, messageId) {
+        const current = MessageStore.getMessage(channelId, messageId);
+        const existing = (current && current.attachments) || [];
+        if (MAX_ATTACHMENTS - existing.length <= 0) return showToast("You cannot add more attachments to this message.");
+
+        let picked;
+        try {
+            picked = await pickFiles();
+        } catch (e) {
+            if (e && e.code === "DOCUMENT_PICKER_CANCELED") return;
+            return showToast("File picker failed: " + (e && e.message ? e.message : e));
+        }
+        if (!picked.length) return;
+
+        enqueue(() => uploadPicked(channelId, messageId, picked));
+    }
+
+    // ---------------------------------------------------------------- photo tray while editing
+
+    // Discord's file objects aren't documented: walk the object for a local uri + a filename.
+    function digFile(file) {
+        let uri = null, name = null;
+        const seen = new Set();
+        (function walk(o, d) {
+            if (!o || typeof o !== "object" || d > 4 || seen.has(o)) return;
+            seen.add(o);
+            for (const k of Object.keys(o)) {
+                const v = o[k];
+                if (typeof v === "string") {
+                    if (!uri && /^(file|content|ph|assets-library):/i.test(v)) uri = v;
+                    else if (!name && /^(filename|fileName|name)$/.test(k)) name = v;
+                } else if (v && typeof v === "object") {
+                    walk(v, d + 1);
+                }
+            }
+        })(file, 0);
+        if (!uri) return null;
+        if (!name) {
+            try { name = decodeURIComponent(uri.split("?")[0].split("/").pop()); } catch (e) { name = null; }
+        }
+        return { uri, name: name || "attachment" };
+    }
+
+    function describe(o) {
+        try {
+            if (!o || typeof o !== "object") return String(o);
+            return Object.keys(o).slice(0, 12).map(k => {
+                const v = o[k];
+                if (v && typeof v === "object")
+                    return k + ":{" + Object.keys(v).slice(0, 8).join(",") + "}";
+                return k + ":" + (typeof v === "string" ? JSON.stringify(v.slice(0, 40)) : String(v));
+            }).join("\n");
+        } catch (e) {
+            return "?";
+        }
+    }
+
+    function editingMessageFor(channelId) {
+        try { return EditMessageStore && EditMessageStore.getEditingMessage(channelId); } catch (e) { return null; }
+    }
+
+    const handledFiles = new WeakSet();
+
+    function onSetFile(args, orig) {
+        try {
+            const payload = args[0];
+            const channelId = payload && payload.channelId;
+            const editing = channelId ? editingMessageFor(channelId) : null;
+
+            if (!editing || !payload.file || (payload.draftType !== undefined && payload.draftType !== 0))
+                return orig(...args);
+            if (!canAddAttachments(editing)) return orig(...args);
+
+            if (typeof payload.file === "object") {
+                if (handledFiles.has(payload.file)) return;
+                handledFiles.add(payload.file);
+            }
+
+            const info = digFile(payload.file);
+            if (!info) {
+                RN.Alert.alert("AddAttachments: unknown file shape (send me this)", describe(payload.file));
+                return orig(...args);
+            }
+
+            enqueue(() => uploadPicked(channelId, editing.id, [info]));
+        } catch (e) {
+            console.error("[AddAttachments] setFile hook error", e);
+            return orig(...args);
+        }
+    }
+
+    // ---------------------------------------------------------------- long-press row injection
 
     function labelOf(el) {
         const p = (el && el.props) || {};
@@ -126,7 +220,6 @@
         return v ? v.trim().toLowerCase() : null;
     }
 
-    // an array of row-like elements: at least one child that has a text label and an onPress
     function isRowsArray(x) {
         return Array.isArray(x) && x.some(el => el && el.props && labelOf(el) && typeof el.props.onPress === "function");
     }
@@ -158,7 +251,6 @@
     }
 
     function makeRow(rows, message) {
-        // clone a neutral row so props/styling match this Discord build
         const preferred = ["reply", "copy text", "edit message", "copy message link", "forward"];
         const candidates = rows.filter(el => el && el.props && labelOf(el) && typeof el.props.onPress === "function");
         const sample =
@@ -175,14 +267,12 @@
             }
         });
 
-        // set whichever text prop the sample uses
         for (const k of ["label", "title", "text", "accessibilityLabel"]) {
             if (typeof sp[k] === "string") props[k] = "Add Attachments";
         }
         delete props.subLabel;
         delete props.trailing;
 
-        // swap the icon, keeping its element type
         if (React.isValidElement(sp.icon)) {
             props.icon = React.cloneElement(sp.icon, { source: getAssetIDByName("ic_upload") });
         }
@@ -208,104 +298,37 @@
                     if (rows.some(el => el && el.key === "add-attachments")) return;
 
                     rows.push(makeRow(rows, message));
-                    dbg("row added");
                 } catch (e) {
                     console.log("[AddAttachments] inject error", e);
-                    dbg("inject error: " + (e && e.message ? e.message : e));
                 }
                 return tree;
             })
         );
     }
 
-    function probe() {
-        const lines = ["AddAttachments v8 loaded"];
-        const names = ["UploadAttachmentStore", "CloudUploadStore", "UploadStore", "DraftStore", "EditMessageStore", "PendingReplyStore"];
-        for (const n of names) {
-            let st;
-            try { st = findByStoreName(n); } catch (e) { st = null; }
-            if (st) {
-                const m = Object.getOwnPropertyNames(Object.getPrototypeOf(st))
-                    .filter(k => k !== "constructor" && typeof st[k] === "function");
-                lines.push(n + ": " + m.slice(0, 40).join(", "));
-            } else {
-                lines.push(n + ": -");
-            }
-        }
-
-        const MA = findByProps("sendMessage", "editMessage");
-        lines.push("MessageActions(sendMessage+editMessage): " + (MA ? "found" : "missing"));
-        const UP = findByProps("uploadLocalFiles") || findByProps("addFiles") || findByProps("addFile");
-        lines.push("upload module: " + (UP ? Object.keys(UP).slice(0, 30).join(", ") : "-"));
-
-        RN.Alert.alert("AddAttachments probe (send me this)", lines.join("\n"));
-
-        const buf = [];
-        let timer = null;
-        const flush = () => {
-            timer = null;
-            if (!buf.length) return;
-            const text = buf.splice(0).join("\n");
-            RN.Alert.alert("AddAttachments probe: calls", text.slice(0, 3500));
-        };
-
-        const kv = a => {
-            try {
-                if (a === null || a === undefined) return String(a);
-                if (typeof a === "string") return JSON.stringify(a.slice(0, 40));
-                if (typeof a !== "object") return String(a);
-                if (Array.isArray(a)) return "[" + a.length + "]";
-                return "{" + Object.keys(a).slice(0, 10).map(k => {
-                    const v = a[k];
-                    const t = v && typeof v === "object" ? (Array.isArray(v) ? "[" + v.length + "]" : "{..}")
-                        : typeof v === "function" ? "fn"
-                        : typeof v === "string" ? JSON.stringify(v.slice(0, 30))
-                        : String(v);
-                    return k + ":" + t;
-                }).join(",") + "}";
-            } catch (e) {
-                return "?";
-            }
-        };
-
-        const hook = (mod, label, pattern) => {
-            if (!mod) return;
-            for (const fn of Object.keys(mod)) {
-                try {
-                    if (typeof mod[fn] !== "function" || !pattern.test(fn)) continue;
-                    unpatches.push(
-                        before(fn, mod, args => {
-                            if (buf.length < 25) buf.push(label + "." + fn + "(" + args.map(kv).join(", ") + ")");
-                            if (!timer) timer = setTimeout(flush, 1500);
-                        })
-                    );
-                } catch (e) {}
-            }
-        };
-        hook(MA, "MA", /send|edit|upload|attach/i);
-        hook(UP, "UP", /./);
-    }
-
     return {
         onLoad() {
-            if (PROBE) probe(); else RN.Alert.alert("AddAttachments", "loaded (v8)");
-            if (!LazyActionSheet) return showToast("AddAttachments: action sheet module not found");
+            if (LazyActionSheet) {
+                unpatches.push(
+                    before("openLazy", LazyActionSheet, ([component, key, props]) => {
+                        const message = props && props.message;
+                        if (key !== "MessageLongPressActionSheet" || !message) return;
+                        currentMessage = message;
+                        component.then(patchInstance);
+                    })
+                );
+            }
 
-            unpatches.push(
-                before("openLazy", LazyActionSheet, ([component, key, props]) => {
-                    const message = props && props.message;
-                    if (DEBUG) dbg("openLazy '" + key + "', hasMessage=" + !!message + (message ? ", eligible=" + canAddAttachments(message) : ""));
-                    if (key !== "MessageLongPressActionSheet" || !message) return;
-                    currentMessage = message;
-                    component.then(patchInstance);
-                })
-            );
+            if (UP && typeof UP.setFile === "function") {
+                unpatches.push(instead("setFile", UP, onSetFile));
+            }
         },
         onUnload() {
             unpatches.forEach(u => u());
             unpatches = [];
         }
     };
+
     } catch (e) {
         return {
             onLoad() {
