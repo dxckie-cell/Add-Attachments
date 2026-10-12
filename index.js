@@ -1,6 +1,5 @@
-// Ported from Vencord/Equicord "AddAttachments" by Lumap
-// SPDX-License-Identifier: GPL-3.0-or-later
 (function () {
+    /* Ported from Vencord/Equicord "AddAttachments" by Lumap. SPDX-License-Identifier: GPL-3.0-or-later */
     const RN = vendetta.metro.common.ReactNative;
     try {
     // Set to false once the "Add Attachments" row shows up reliably.
@@ -219,7 +218,7 @@
 
     return {
         onLoad() {
-            RN.Alert.alert("AddAttachments", "loaded (v5)");
+            RN.Alert.alert("AddAttachments", "loaded (v6)");
             if (!LazyActionSheet) return showToast("AddAttachments: action sheet module not found");
 
             unpatches.push(
