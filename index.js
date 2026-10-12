@@ -203,7 +203,7 @@
         lastDebug = now;
         const safe = f => { try { return f(); } catch (e) { return "err:" + (e && e.message); } };
         RN.Alert.alert("AddAttachments debug (send me this)", [
-            "v15: upload call '" + key + "'",
+            "v16: upload call '" + key + "'",
             "channelId: " + payload.channelId,
             "draftType: " + payload.draftType,
             "editing: " + (editing ? "message id=" + editing.id + " type=" + editing.type : "none"),
@@ -365,6 +365,7 @@
     }
 
     let unpatches = [];
+    let startTimer = null;
     const patched = new WeakSet();
     let currentMessage = null;
 
@@ -428,37 +429,29 @@
             } catch (e) {
                 hookState = "hook error: " + (e && e.message ? e.message : e);
             }
-            try {
-                if (MA && typeof MA.sendMessage === "function") {
-                    const origSend = MA.sendMessage;
-                    const sendWrapper = function () {
-                        const args = Array.prototype.slice.call(arguments);
-                        return onSendMessage(args, function () { return origSend.apply(MA, arguments); });
-                    };
-                    MA.sendMessage = sendWrapper;
-                    if (MA.sendMessage === sendWrapper) {
-                        unpatches.push(() => { if (MA.sendMessage === sendWrapper) MA.sendMessage = origSend; });
-                        hookState += "\nsendMessage hook installed";
-                    } else {
-                        hookState += "\nsendMessage could NOT be replaced";
-                    }
-                } else {
-                    hookState += "\nsendMessage NOT found";
-                }
-                if (EditMessageStore && typeof EditMessageStore.addChangeListener === "function") {
-                    EditMessageStore.addChangeListener(onEditStoreChange);
-                    unpatches.push(() => EditMessageStore.removeChangeListener(onEditStoreChange));
-                    hookState += "\nedit listener installed";
-                } else {
-                    hookState += "\nedit listener NOT available";
-                }
-            } catch (e) {
-                hookState += "\nsend hook error: " + (e && e.message ? e.message : e);
-            }
-            if (DEBUG_SEND) RN.Alert.alert("AddAttachments", "v15 loaded\n" + hookState);
-        },
-        onUnload() {
-            unpatches.forEach(u => u());
-            unpatches = [];
-        }
-    }
+            // installed shortly AFTER load, fully guarded, so a problem here can never stop the plugin switching on
+            startTimer = setTimeout(function () {
+                startTimer = null;
+                try {
+                    try {
+                        if (MA && typeof MA.sendMessage === "function") {
+                            const origSend = MA.sendMessage;
+                            const sendWrapper = function () {
+                                const args = Array.prototype.slice.call(arguments);
+                                return onSendMessage(args, function () { return origSend.apply(MA, arguments); });
+                            };
+                            MA.sendMessage = sendWrapper;
+                            if (MA.sendMessage === sendWrapper) {
+                                unpatches.push(() => { if (MA.sendMessage === sendWrapper) MA.sendMessage = origSend; });
+                                hookState += "\nsendMessage hook installed";
+                            } else {
+                                hookState += "\nsendMessage could NOT be replaced";
+                            }
+                        } else {
+                            hookState += "\nsendMessage NOT found";
+                        }
+                        if (EditMessageStore && typeof EditMessageStore.addChangeListener === "function") {
+                            EditMessageStore.addChangeListener(onEditStoreChange);
+                            unpatches.push(() => EditMessageStore.removeChangeListener(onEditStoreChange));
+                            hookState += "\nedit listener installed";
+                       
