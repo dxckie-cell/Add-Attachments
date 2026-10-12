@@ -3,12 +3,12 @@
     const RN = vendetta.metro.common.ReactNative;
     try {
     const DEBUG = false;
-    // Temporary: popup on every photo pick showing what the edit-mode check sees (v10).
+    // Temporary: popup on every photo pick showing what the edit-mode check sees (v11).
     const DEBUG_SETFILE = true;
 
     const { findByProps, findByStoreName } = vendetta.metro;
     const { React } = vendetta.metro.common;
-    const { after, before, instead } = vendetta.patcher;
+    const { after, before } = vendetta.patcher;
     const { getAssetIDByName } = vendetta.ui.assets;
     const { showToast } = vendetta.ui.toasts;
 
@@ -201,7 +201,7 @@
         const ch = payload && payload.channelId;
         const em = ch ? safe(() => EditMessageStore.getEditingMessage(ch)) : null;
         const lines = [
-            "AddAttachments v10: setFile fired",
+            "AddAttachments v11: setFile fired",
             "channelId: " + ch,
             "draftType: " + (payload && payload.draftType),
             "getEditingMessage: " + (em && typeof em === "object" ? "message id=" + em.id + " type=" + em.type + " author=" + (em.author && em.author.id) : String(em)),
@@ -353,9 +353,31 @@
                 );
             }
 
-            if (UP && typeof UP.setFile === "function") {
-                unpatches.push(instead("setFile", UP, onSetFile));
+            // wrap setFile by hand (no dependency on patcher.instead)
+            let hookState;
+            try {
+                if (!UP) {
+                    hookState = "upload module NOT found";
+                } else if (typeof UP.setFile !== "function") {
+                    hookState = "setFile NOT a function";
+                } else {
+                    const origSetFile = UP.setFile;
+                    const wrapper = function () {
+                        const args = Array.prototype.slice.call(arguments);
+                        return onSetFile(args, function () { return origSetFile.apply(UP, arguments); });
+                    };
+                    UP.setFile = wrapper;
+                    if (UP.setFile === wrapper) {
+                        unpatches.push(() => { if (UP.setFile === wrapper) UP.setFile = origSetFile; });
+                        hookState = "setFile hook installed";
+                    } else {
+                        hookState = "setFile could NOT be replaced (read-only)";
+                    }
+                }
+            } catch (e) {
+                hookState = "hook error: " + (e && e.message ? e.message : e);
             }
+            RN.Alert.alert("AddAttachments", "v11 loaded\n" + hookState);
         },
         onUnload() {
             unpatches.forEach(u => u());
