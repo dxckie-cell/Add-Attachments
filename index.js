@@ -3,7 +3,9 @@
     const RN = vendetta.metro.common.ReactNative;
     try {
     // Set to false once the "Add Attachments" row shows up reliably.
-    const DEBUG = true;
+    const DEBUG = false;
+    // Temporary: reports upload internals so the photo-tray-in-edit-mode hook can be written.
+    const PROBE = true;
 
     const { findByProps, findByStoreName } = vendetta.metro;
     const { React } = vendetta.metro.common;
@@ -216,9 +218,49 @@
         );
     }
 
+    function probe() {
+        const lines = ["AddAttachments v7 loaded"];
+        const names = ["UploadAttachmentStore", "CloudUploadStore", "UploadStore", "DraftStore", "EditMessageStore", "PendingReplyStore"];
+        for (const n of names) {
+            let st;
+            try { st = findByStoreName(n); } catch (e) { st = null; }
+            if (st) {
+                const m = Object.getOwnPropertyNames(Object.getPrototypeOf(st))
+                    .filter(k => k !== "constructor" && typeof st[k] === "function");
+                lines.push(n + ": " + m.slice(0, 40).join(", "));
+            } else {
+                lines.push(n + ": -");
+            }
+        }
+
+        const MA = findByProps("sendMessage", "editMessage");
+        lines.push("MessageActions(sendMessage+editMessage): " + (MA ? "found" : "missing"));
+        const UP = findByProps("uploadLocalFiles") || findByProps("addFiles") || findByProps("addFile");
+        lines.push("upload module: " + (UP ? Object.keys(UP).slice(0, 30).join(", ") : "-"));
+
+        RN.Alert.alert("AddAttachments probe (send me this)", lines.join("\n"));
+
+        const summarize = a =>
+            a && typeof a === "object" ? "{" + Object.keys(a).slice(0, 8).join(",") + "}" : typeof a;
+
+        const hook = (mod, label, fns) => {
+            if (!mod) return;
+            for (const fn of fns) {
+                if (typeof mod[fn] !== "function") continue;
+                unpatches.push(
+                    before(fn, mod, args => {
+                        showToast(label + "." + fn + " args: " + args.map(summarize).join(" | "));
+                    })
+                );
+            }
+        };
+        hook(MA, "MA", ["sendMessage", "editMessage", "uploadLocalFiles"]);
+        hook(UP, "UP", Object.keys(UP || {}).filter(k => typeof UP[k] === "function").slice(0, 12));
+    }
+
     return {
         onLoad() {
-            RN.Alert.alert("AddAttachments", "loaded (v6)");
+            if (PROBE) probe(); else RN.Alert.alert("AddAttachments", "loaded (v7)");
             if (!LazyActionSheet) return showToast("AddAttachments: action sheet module not found");
 
             unpatches.push(
