@@ -193,55 +193,53 @@
     }
 
     let lastDebug = 0;
-    function debugSetFile(payload) {
+    function debugUploadCall(key, payload, editing) {
         const now = Date.now();
         if (now - lastDebug < 3000) return;
         lastDebug = now;
         const safe = f => { try { return f(); } catch (e) { return "err:" + (e && e.message); } };
-        const ch = payload && payload.channelId;
-        const em = ch ? safe(() => EditMessageStore.getEditingMessage(ch)) : null;
-        const lines = [
-            "AddAttachments v12: setFile fired",
-            "channelId: " + ch,
-            "draftType: " + (payload && payload.draftType),
-            "getEditingMessage: " + (em && typeof em === "object" ? "message id=" + em.id + " type=" + em.type + " author=" + (em.author && em.author.id) : String(em)),
-            "getEditingMessageId: " + safe(() => String(EditMessageStore.getEditingMessageId(ch))),
-            "isEditing(ch): " + safe(() => String(EditMessageStore.isEditing(ch))),
-            "isEditingAny: " + safe(() => String(EditMessageStore.isEditingAny())),
-            "me: " + safe(() => UserStore.getCurrentUser().id),
-            "canAdd: " + (em && typeof em === "object" ? safe(() => String(canAddAttachments(em))) : "n/a"),
-            "file keys: " + safe(() => Object.keys(payload.file || {}).slice(0, 12).join(","))
-        ];
-        RN.Alert.alert("AddAttachments debug (send me this)", lines.join("\n"));
+        RN.Alert.alert("AddAttachments debug (send me this)", [
+            "v13: upload call '" + key + "'",
+            "channelId: " + payload.channelId,
+            "draftType: " + payload.draftType,
+            "editing: " + (editing ? "message id=" + editing.id + " type=" + editing.type : "none"),
+            "canAdd: " + (editing ? safe(() => String(canAddAttachments(editing))) : "n/a"),
+            "payload keys: " + safe(() => Object.keys(payload).join(",")),
+            "file: " + describe(payload.file)
+        ].join("\n"));
     }
 
     const handledFiles = new WeakSet();
 
-    function onSetFile(args, orig) {
+    // Called for EVERY function of the upload module. Only acts on "add a file to the channel draft"
+    // calls (object with channelId + file) made while one of your own messages is being edited.
+    function onUploadCall(key, args, orig) {
         try {
             const payload = args[0];
-            if (DEBUG_SETFILE) debugSetFile(payload);
-            const channelId = payload && payload.channelId;
-            const editing = channelId ? editingMessageFor(channelId) : null;
-
-            if (!editing || !payload.file || (payload.draftType !== undefined && payload.draftType !== 0))
+            if (!payload || typeof payload !== "object" || !payload.channelId ||
+                !payload.file || typeof payload.file !== "object")
                 return orig(...args);
-            if (!canAddAttachments(editing)) return orig(...args);
+            if (payload.draftType !== undefined && payload.draftType !== 0) return orig(...args);
 
-            if (typeof payload.file === "object") {
-                if (handledFiles.has(payload.file)) return;
-                handledFiles.add(payload.file);
-            }
+            const channelId = payload.channelId;
+            const editing = editingMessageFor(channelId);
+            if (DEBUG_SETFILE) debugUploadCall(key, payload, editing);
+            if (!editing || !canAddAttachments(editing)) return orig(...args);
+
+            // the same file object may pass through several upload functions: handle it once
+            if (handledFiles.has(payload.file)) return;
+            handledFiles.add(payload.file);
 
             const info = digFile(payload.file);
             if (!info) {
-                RN.Alert.alert("AddAttachments: unknown file shape (send me this)", describe(payload.file));
+                handledFiles.delete(payload.file);
+                RN.Alert.alert("AddAttachments: unknown file shape (send me this)", key + "\n" + describe(payload.file));
                 return orig(...args);
             }
 
             enqueue(() => uploadPicked(channelId, editing.id, [info]));
         } catch (e) {
-            console.error("[AddAttachments] setFile hook error", e);
+            console.error("[AddAttachments] upload hook error", e);
             return orig(...args);
         }
     }
@@ -340,51 +338,6 @@
         );
     }
 
-    // Temporary (v12): log every upload/send call, same as the v8 probe that did fire on photo picks.
-    function probeAll(unpatches) {
-        const buf = [];
-        let timer = null;
-        const flush = () => {
-            timer = null;
-            if (!buf.length) return;
-            RN.Alert.alert("AddAttachments calls (send me this)", buf.splice(0).join("\n").slice(0, 3500));
-        };
-        const kv = a => {
-            try {
-                if (a === null || a === undefined) return String(a);
-                if (typeof a === "string") return JSON.stringify(a.slice(0, 40));
-                if (typeof a !== "object") return String(a);
-                if (Array.isArray(a)) return "[" + a.length + "]";
-                return "{" + Object.keys(a).slice(0, 10).map(k => {
-                    const v = a[k];
-                    const t = v && typeof v === "object" ? (Array.isArray(v) ? "[" + v.length + "]" : "{..}")
-                        : typeof v === "function" ? "fn"
-                        : typeof v === "string" ? JSON.stringify(v.slice(0, 30))
-                        : String(v);
-                    return k + ":" + t;
-                }).join(",") + "}";
-            } catch (e) {
-                return "?";
-            }
-        };
-        const hook = (mod, label, pattern) => {
-            if (!mod) return;
-            for (const fn of Object.keys(mod)) {
-                try {
-                    if (typeof mod[fn] !== "function" || !pattern.test(fn)) continue;
-                    unpatches.push(
-                        before(fn, mod, args => {
-                            if (buf.length < 25) buf.push(label + "." + fn + "(" + args.map(kv).join(", ") + ")");
-                            if (!timer) timer = setTimeout(flush, 1500);
-                        })
-                    );
-                } catch (e) {}
-            }
-        };
-        hook(UP, "UP", /./);
-        hook(findByProps("sendMessage", "editMessage"), "MA", /send|edit|upload|attach/i);
-    }
-
     return {
         onLoad() {
             if (LazyActionSheet) {
@@ -398,32 +351,32 @@
                 );
             }
 
-            // wrap setFile by hand (no dependency on patcher.instead)
+            // wrap every function of the upload module by hand; onUploadCall decides what to intercept
             let hookState;
             try {
                 if (!UP) {
                     hookState = "upload module NOT found";
-                } else if (typeof UP.setFile !== "function") {
-                    hookState = "setFile NOT a function";
                 } else {
-                    const origSetFile = UP.setFile;
-                    const wrapper = function () {
-                        const args = Array.prototype.slice.call(arguments);
-                        return onSetFile(args, function () { return origSetFile.apply(UP, arguments); });
-                    };
-                    UP.setFile = wrapper;
-                    if (UP.setFile === wrapper) {
-                        unpatches.push(() => { if (UP.setFile === wrapper) UP.setFile = origSetFile; });
-                        hookState = "setFile hook installed";
-                    } else {
-                        hookState = "setFile could NOT be replaced (read-only)";
-                    }
+                    const wrapped = [];
+                    Object.keys(UP).forEach(key => {
+                        const origFn = UP[key];
+                        if (typeof origFn !== "function") return;
+                        const wrapper = function () {
+                            const args = Array.prototype.slice.call(arguments);
+                            return onUploadCall(key, args, function () { return origFn.apply(UP, arguments); });
+                        };
+                        try {
+                            UP[key] = wrapper;
+                            if (UP[key] === wrapper) wrapped.push([key, origFn, wrapper]);
+                        } catch (e) {}
+                    });
+                    unpatches.push(() => wrapped.forEach(([k, o, w]) => { if (UP[k] === w) UP[k] = o; }));
+                    hookState = "wrapped " + wrapped.length + " upload functions: " + wrapped.map(w => w[0]).join(", ");
                 }
             } catch (e) {
                 hookState = "hook error: " + (e && e.message ? e.message : e);
             }
-            RN.Alert.alert("AddAttachments", "v12 loaded\n" + hookState);
-            probeAll(unpatches);
+            RN.Alert.alert("AddAttachments", "v13 loaded\n" + hookState);
         },
         onUnload() {
             unpatches.forEach(u => u());
