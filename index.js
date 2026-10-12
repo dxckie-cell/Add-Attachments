@@ -3,6 +3,8 @@
     const RN = vendetta.metro.common.ReactNative;
     try {
     const DEBUG = false;
+    // Temporary: popup on every photo pick showing what the edit-mode check sees (v10).
+    const DEBUG_SETFILE = true;
 
     const { findByProps, findByStoreName } = vendetta.metro;
     const { React } = vendetta.metro.common;
@@ -179,7 +181,38 @@
     }
 
     function editingMessageFor(channelId) {
-        try { return EditMessageStore && EditMessageStore.getEditingMessage(channelId); } catch (e) { return null; }
+        try {
+            const m = EditMessageStore.getEditingMessage(channelId);
+            if (m) return m;
+        } catch (e) {}
+        try {
+            const id = EditMessageStore.getEditingMessageId(channelId);
+            if (id) return MessageStore.getMessage(channelId, id) || null;
+        } catch (e) {}
+        return null;
+    }
+
+    let lastDebug = 0;
+    function debugSetFile(payload) {
+        const now = Date.now();
+        if (now - lastDebug < 3000) return;
+        lastDebug = now;
+        const safe = f => { try { return f(); } catch (e) { return "err:" + (e && e.message); } };
+        const ch = payload && payload.channelId;
+        const em = ch ? safe(() => EditMessageStore.getEditingMessage(ch)) : null;
+        const lines = [
+            "AddAttachments v10: setFile fired",
+            "channelId: " + ch,
+            "draftType: " + (payload && payload.draftType),
+            "getEditingMessage: " + (em && typeof em === "object" ? "message id=" + em.id + " type=" + em.type + " author=" + (em.author && em.author.id) : String(em)),
+            "getEditingMessageId: " + safe(() => String(EditMessageStore.getEditingMessageId(ch))),
+            "isEditing(ch): " + safe(() => String(EditMessageStore.isEditing(ch))),
+            "isEditingAny: " + safe(() => String(EditMessageStore.isEditingAny())),
+            "me: " + safe(() => UserStore.getCurrentUser().id),
+            "canAdd: " + (em && typeof em === "object" ? safe(() => String(canAddAttachments(em))) : "n/a"),
+            "file keys: " + safe(() => Object.keys(payload.file || {}).slice(0, 12).join(","))
+        ];
+        RN.Alert.alert("AddAttachments debug (send me this)", lines.join("\n"));
     }
 
     const handledFiles = new WeakSet();
@@ -187,6 +220,7 @@
     function onSetFile(args, orig) {
         try {
             const payload = args[0];
+            if (DEBUG_SETFILE) debugSetFile(payload);
             const channelId = payload && payload.channelId;
             const editing = channelId ? editingMessageFor(channelId) : null;
 
