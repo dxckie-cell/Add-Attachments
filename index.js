@@ -3,7 +3,7 @@
     const RN = vendetta.metro.common.ReactNative;
     try {
     const DEBUG = false;
-    // Temporary: popup on every photo pick showing what the edit-mode check sees (v11).
+    // Temporary: popup on every photo pick showing what the edit-mode check sees (v12).
     const DEBUG_SETFILE = true;
 
     const { findByProps, findByStoreName } = vendetta.metro;
@@ -201,7 +201,7 @@
         const ch = payload && payload.channelId;
         const em = ch ? safe(() => EditMessageStore.getEditingMessage(ch)) : null;
         const lines = [
-            "AddAttachments v11: setFile fired",
+            "AddAttachments v12: setFile fired",
             "channelId: " + ch,
             "draftType: " + (payload && payload.draftType),
             "getEditingMessage: " + (em && typeof em === "object" ? "message id=" + em.id + " type=" + em.type + " author=" + (em.author && em.author.id) : String(em)),
@@ -340,6 +340,51 @@
         );
     }
 
+    // Temporary (v12): log every upload/send call, same as the v8 probe that did fire on photo picks.
+    function probeAll(unpatches) {
+        const buf = [];
+        let timer = null;
+        const flush = () => {
+            timer = null;
+            if (!buf.length) return;
+            RN.Alert.alert("AddAttachments calls (send me this)", buf.splice(0).join("\n").slice(0, 3500));
+        };
+        const kv = a => {
+            try {
+                if (a === null || a === undefined) return String(a);
+                if (typeof a === "string") return JSON.stringify(a.slice(0, 40));
+                if (typeof a !== "object") return String(a);
+                if (Array.isArray(a)) return "[" + a.length + "]";
+                return "{" + Object.keys(a).slice(0, 10).map(k => {
+                    const v = a[k];
+                    const t = v && typeof v === "object" ? (Array.isArray(v) ? "[" + v.length + "]" : "{..}")
+                        : typeof v === "function" ? "fn"
+                        : typeof v === "string" ? JSON.stringify(v.slice(0, 30))
+                        : String(v);
+                    return k + ":" + t;
+                }).join(",") + "}";
+            } catch (e) {
+                return "?";
+            }
+        };
+        const hook = (mod, label, pattern) => {
+            if (!mod) return;
+            for (const fn of Object.keys(mod)) {
+                try {
+                    if (typeof mod[fn] !== "function" || !pattern.test(fn)) continue;
+                    unpatches.push(
+                        before(fn, mod, args => {
+                            if (buf.length < 25) buf.push(label + "." + fn + "(" + args.map(kv).join(", ") + ")");
+                            if (!timer) timer = setTimeout(flush, 1500);
+                        })
+                    );
+                } catch (e) {}
+            }
+        };
+        hook(UP, "UP", /./);
+        hook(findByProps("sendMessage", "editMessage"), "MA", /send|edit|upload|attach/i);
+    }
+
     return {
         onLoad() {
             if (LazyActionSheet) {
@@ -377,7 +422,8 @@
             } catch (e) {
                 hookState = "hook error: " + (e && e.message ? e.message : e);
             }
-            RN.Alert.alert("AddAttachments", "v11 loaded\n" + hookState);
+            RN.Alert.alert("AddAttachments", "v12 loaded\n" + hookState);
+            probeAll(unpatches);
         },
         onUnload() {
             unpatches.forEach(u => u());
