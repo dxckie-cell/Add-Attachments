@@ -3,6 +3,6 @@
   "description": "Add new attachments to your existing messages",
   "authors": [{ "name": "Lumap (original), ported" }],
   "main": "index.js",
-  "hash": "76d9f74a9a87646343c9159f61734f5db74b0ad1e5c2d0427c7fb195a36a77aa",
+  "hash": "bfaa998c9aaf9aa222502259e5b9a7e130b015a0d8dc808ca4a7cb213633b996",
   "vendetta": { "icon": "ic_upload" }
 }
