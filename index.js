@@ -219,7 +219,7 @@
     }
 
     function probe() {
-        const lines = ["AddAttachments v7 loaded"];
+        const lines = ["AddAttachments v8 loaded"];
         const names = ["UploadAttachmentStore", "CloudUploadStore", "UploadStore", "DraftStore", "EditMessageStore", "PendingReplyStore"];
         for (const n of names) {
             let st;
@@ -240,27 +240,55 @@
 
         RN.Alert.alert("AddAttachments probe (send me this)", lines.join("\n"));
 
-        const summarize = a =>
-            a && typeof a === "object" ? "{" + Object.keys(a).slice(0, 8).join(",") + "}" : typeof a;
+        const buf = [];
+        let timer = null;
+        const flush = () => {
+            timer = null;
+            if (!buf.length) return;
+            const text = buf.splice(0).join("\n");
+            RN.Alert.alert("AddAttachments probe: calls", text.slice(0, 3500));
+        };
 
-        const hook = (mod, label, fns) => {
-            if (!mod) return;
-            for (const fn of fns) {
-                if (typeof mod[fn] !== "function") continue;
-                unpatches.push(
-                    before(fn, mod, args => {
-                        showToast(label + "." + fn + " args: " + args.map(summarize).join(" | "));
-                    })
-                );
+        const kv = a => {
+            try {
+                if (a === null || a === undefined) return String(a);
+                if (typeof a === "string") return JSON.stringify(a.slice(0, 40));
+                if (typeof a !== "object") return String(a);
+                if (Array.isArray(a)) return "[" + a.length + "]";
+                return "{" + Object.keys(a).slice(0, 10).map(k => {
+                    const v = a[k];
+                    const t = v && typeof v === "object" ? (Array.isArray(v) ? "[" + v.length + "]" : "{..}")
+                        : typeof v === "function" ? "fn"
+                        : typeof v === "string" ? JSON.stringify(v.slice(0, 30))
+                        : String(v);
+                    return k + ":" + t;
+                }).join(",") + "}";
+            } catch (e) {
+                return "?";
             }
         };
-        hook(MA, "MA", ["sendMessage", "editMessage", "uploadLocalFiles"]);
-        hook(UP, "UP", Object.keys(UP || {}).filter(k => typeof UP[k] === "function").slice(0, 12));
+
+        const hook = (mod, label, pattern) => {
+            if (!mod) return;
+            for (const fn of Object.keys(mod)) {
+                try {
+                    if (typeof mod[fn] !== "function" || !pattern.test(fn)) continue;
+                    unpatches.push(
+                        before(fn, mod, args => {
+                            if (buf.length < 25) buf.push(label + "." + fn + "(" + args.map(kv).join(", ") + ")");
+                            if (!timer) timer = setTimeout(flush, 1500);
+                        })
+                    );
+                } catch (e) {}
+            }
+        };
+        hook(MA, "MA", /send|edit|upload|attach/i);
+        hook(UP, "UP", /./);
     }
 
     return {
         onLoad() {
-            if (PROBE) probe(); else RN.Alert.alert("AddAttachments", "loaded (v7)");
+            if (PROBE) probe(); else RN.Alert.alert("AddAttachments", "loaded (v8)");
             if (!LazyActionSheet) return showToast("AddAttachments: action sheet module not found");
 
             unpatches.push(
