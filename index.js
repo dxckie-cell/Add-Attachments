@@ -5,6 +5,8 @@
     const DEBUG = false;
     // Set true to get a popup on every photo pick while editing (debugging only).
     const DEBUG_SETFILE = false;
+    // Temporary: explains in a popup why a send was NOT redirected while a photo was picked in edit mode.
+    const DEBUG_SEND = true;
 
     const { findByProps, findByStoreName } = vendetta.metro;
     const { React } = vendetta.metro.common;
@@ -19,6 +21,7 @@
     const MessageStore = findByStoreName("MessageStore");
     const EditMessageStore = findByStoreName("EditMessageStore");
     // upload actions module (popFirstFile, addFile(s), setFile, clearAll, ...)
+    const MA = findByProps("sendMessage", "editMessage");
     const UP = findByProps("uploadLocalFiles") || findByProps("addFiles") || findByProps("addFile");
 
     const MAX_ATTACHMENTS = 10;
@@ -200,7 +203,7 @@
         lastDebug = now;
         const safe = f => { try { return f(); } catch (e) { return "err:" + (e && e.message); } };
         RN.Alert.alert("AddAttachments debug (send me this)", [
-            "v14: upload call '" + key + "'",
+            "v15: upload call '" + key + "'",
             "channelId: " + payload.channelId,
             "draftType: " + payload.draftType,
             "editing: " + (editing ? "message id=" + editing.id + " type=" + editing.type : "none"),
@@ -210,39 +213,87 @@
         ].join("\n"));
     }
 
-    const handledFiles = new WeakSet();
+    // channelId -> { messageId, endedAt }: the message being edited when a photo was picked in the tray
+    const editTargets = new Map();
 
-    // Called for EVERY function of the upload module. Only acts on "add a file to the channel draft"
-    // calls (object with channelId + file) made while one of your own messages is being edited.
+    // Called for EVERY function of the upload module. It only notes which message is being edited when
+    // a photo is picked; Discord still adds the photo to the draft as usual (so the chip shows).
     function onUploadCall(key, args, orig) {
         try {
             const payload = args[0];
-            if (!payload || typeof payload !== "object" || !payload.channelId ||
-                !payload.file || typeof payload.file !== "object")
+            if (payload && typeof payload === "object" && payload.channelId &&
+                payload.file && typeof payload.file === "object" &&
+                (payload.draftType === undefined || payload.draftType === 0)) {
+                const editing = editingMessageFor(payload.channelId);
+                if (DEBUG_SETFILE) debugUploadCall(key, payload, editing);
+                if (editing && canAddAttachments(editing)) {
+                    editTargets.set(payload.channelId, { messageId: editing.id, endedAt: null });
+                }
+            }
+        } catch (e) {
+            console.error("[AddAttachments] upload hook error", e);
+        }
+        return orig(...args);
+    }
+
+    let lastSendDebug = 0;
+    function sendDebug(text) {
+        if (!DEBUG_SEND) return;
+        const now = Date.now();
+        if (now - lastSendDebug < 3000) return;
+        lastSendDebug = now;
+        RN.Alert.alert("AddAttachments: send NOT redirected (send me this)", text);
+    }
+
+    // Discord's sendMessage(channelId, message, waitForChannelReady, extra). In edit mode, pressing send with a
+    // photo in the draft ends the edit and then calls this with extra.attachmentsToUpload set.
+    function onSendMessage(args, orig) {
+        try {
+            const channelId = args[0];
+            const msg = args[1];
+            const extra = args[3];
+            if (typeof channelId !== "string" || !extra || !Array.isArray(extra.attachmentsToUpload) ||
+                !extra.attachmentsToUpload.length || !editTargets.has(channelId))
                 return orig(...args);
-            if (payload.draftType !== undefined && payload.draftType !== 0) return orig(...args);
 
-            const channelId = payload.channelId;
-            const editing = editingMessageFor(channelId);
-            if (DEBUG_SETFILE) debugUploadCall(key, payload, editing);
-            if (!editing || !canAddAttachments(editing)) return orig(...args);
+            const entry = editTargets.get(channelId);
+            const editingNow = editingMessageFor(channelId);
+            const recentlyEnded = !!entry.endedAt && Date.now() - entry.endedAt < 4000;
+            const content = msg && typeof msg.content === "string" ? msg.content.trim() : "";
 
-            // the same file object may pass through several upload functions: handle it once
-            if (handledFiles.has(payload.file)) return;
-            handledFiles.add(payload.file);
-
-            const info = digFile(payload.file);
-            if (!info) {
-                handledFiles.delete(payload.file);
-                RN.Alert.alert("AddAttachments: unknown file shape (send me this)", key + "\n" + describe(payload.file));
+            if (!(editingNow || recentlyEnded) || content !== "") {
+                sendDebug("editingNow=" + !!editingNow + "\nendedAt=" + entry.endedAt + "\ncontent=" + JSON.stringify(content));
                 return orig(...args);
             }
 
-            enqueue(() => uploadPicked(channelId, editing.id, [info]));
+            const infos = extra.attachmentsToUpload.map(digFile);
+            if (infos.some(i => !i)) {
+                RN.Alert.alert("AddAttachments: unknown upload shape (send me this)", describe(extra.attachmentsToUpload[0]));
+                return orig(...args);
+            }
+
+            editTargets.delete(channelId);
+            enqueue(() => uploadPicked(channelId, entry.messageId, infos));
+            return Promise.resolve();
         } catch (e) {
-            console.error("[AddAttachments] upload hook error", e);
+            console.error("[AddAttachments] send hook error", e);
             return orig(...args);
         }
+    }
+
+    // forget the target if the edit ends and no redirected send follows (i.e. you cancelled the edit)
+    function onEditStoreChange() {
+        editTargets.forEach((entry, channelId) => {
+            const ed = editingMessageFor(channelId);
+            if (ed && ed.id === entry.messageId) {
+                entry.endedAt = null;
+            } else if (!entry.endedAt) {
+                entry.endedAt = Date.now();
+                setTimeout(() => {
+                    if (editTargets.get(channelId) === entry) editTargets.delete(channelId);
+                }, 4500);
+            }
+        });
     }
 
     // ---------------------------------------------------------------- long-press row injection
@@ -377,19 +428,37 @@
             } catch (e) {
                 hookState = "hook error: " + (e && e.message ? e.message : e);
             }
-            if (DEBUG) RN.Alert.alert("AddAttachments", "v14 loaded\n" + hookState);
+            try {
+                if (MA && typeof MA.sendMessage === "function") {
+                    const origSend = MA.sendMessage;
+                    const sendWrapper = function () {
+                        const args = Array.prototype.slice.call(arguments);
+                        return onSendMessage(args, function () { return origSend.apply(MA, arguments); });
+                    };
+                    MA.sendMessage = sendWrapper;
+                    if (MA.sendMessage === sendWrapper) {
+                        unpatches.push(() => { if (MA.sendMessage === sendWrapper) MA.sendMessage = origSend; });
+                        hookState += "\nsendMessage hook installed";
+                    } else {
+                        hookState += "\nsendMessage could NOT be replaced";
+                    }
+                } else {
+                    hookState += "\nsendMessage NOT found";
+                }
+                if (EditMessageStore && typeof EditMessageStore.addChangeListener === "function") {
+                    EditMessageStore.addChangeListener(onEditStoreChange);
+                    unpatches.push(() => EditMessageStore.removeChangeListener(onEditStoreChange));
+                    hookState += "\nedit listener installed";
+                } else {
+                    hookState += "\nedit listener NOT available";
+                }
+            } catch (e) {
+                hookState += "\nsend hook error: " + (e && e.message ? e.message : e);
+            }
+            if (DEBUG_SEND) RN.Alert.alert("AddAttachments", "v15 loaded\n" + hookState);
         },
         onUnload() {
             unpatches.forEach(u => u());
             unpatches = [];
         }
-    };
-
-    } catch (e) {
-        return {
-            onLoad() {
-                RN.Alert.alert("AddAttachments failed to init", String((e && (e.stack || e.message)) || e));
-            }
-        };
     }
-})();
