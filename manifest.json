@@ -1,7 +1,7 @@
 {
   "name": "AddAttachments",
   "description": "Add new attachments to your existing messages",
-  "authors": [{ "name": "Lumap (original), ported" }],
+  "authors": [{ "name": "dxckie cell" }],
   "main": "index.js",
   "hash": "9b3a271f95ef549e64f70500ec7ca6e92fe5d6000dc5d7170e11804409c10673",
   "vendetta": { "icon": "ic_upload" }
