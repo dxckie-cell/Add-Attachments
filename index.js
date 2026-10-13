@@ -21,7 +21,6 @@
     const MessageStore = findByStoreName("MessageStore");
     const EditMessageStore = findByStoreName("EditMessageStore");
     // upload actions module (popFirstFile, addFile(s), setFile, clearAll, ...)
-    const MA = findByProps("sendMessage", "editMessage");
     const UP = findByProps("uploadLocalFiles") || findByProps("addFiles") || findByProps("addFile");
 
     const MAX_ATTACHMENTS = 10;
@@ -203,7 +202,7 @@
         lastDebug = now;
         const safe = f => { try { return f(); } catch (e) { return "err:" + (e && e.message); } };
         RN.Alert.alert("AddAttachments debug (send me this)", [
-            "v16: upload call '" + key + "'",
+            "v17: upload call '" + key + "'",
             "channelId: " + payload.channelId,
             "draftType: " + payload.draftType,
             "editing: " + (editing ? "message id=" + editing.id + " type=" + editing.type : "none"),
@@ -433,6 +432,7 @@
             startTimer = setTimeout(function () {
                 startTimer = null;
                 try {
+                    const MA = findByProps("sendMessage", "editMessage");
                     try {
                         if (MA && typeof MA.sendMessage === "function") {
                             const origSend = MA.sendMessage;
@@ -454,4 +454,4 @@
                             EditMessageStore.addChangeListener(onEditStoreChange);
                             unpatches.push(() => EditMessageStore.removeChangeListener(onEditStoreChange));
                             hookState += "\nedit listener installed";
-                       
+       
